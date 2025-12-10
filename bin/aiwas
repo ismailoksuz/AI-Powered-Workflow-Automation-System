@@ -1,0 +1,181 @@
+#!/bin/bash
+
+# ===============================================
+# AI-Powered Workflow Automation System (Entry-Point)
+# ===============================================
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+LOG_FILE="${SCRIPT_DIR}/data/system.log"
+TASK_FILE="${SCRIPT_DIR}/data/tasks.json"
+AI_SCRIPT="${SCRIPT_DIR}/ai/ai_query.py"
+REPORT_SCRIPT="${SCRIPT_DIR}/lib/report_generator.py"
+OUTPUT_DIR="${SCRIPT_DIR}/output"
+PYTHON_BIN="/Library/Frameworks/Python.framework/Versions/3.11/bin/python3"
+
+source "${SCRIPT_DIR}/lib/utils.sh"
+
+# --- SYSTEM INITIALIZATION ---
+
+if [ ! -f "${LOG_FILE}" ]; then
+    touch "${LOG_FILE}"
+    log_message INFO "System log file created."
+fi
+
+if [ ! -d "${OUTPUT_DIR}" ]; then
+    mkdir -p "${OUTPUT_DIR}"
+    log_message INFO "Output directory created: ${OUTPUT_DIR}"
+fi
+
+# Ensure all scripts are executable
+chmod +x "${SCRIPT_DIR}/bin/"*.sh 2>/dev/null
+
+# Function: show_help
+# Description: Displays the main usage commands for AIWAS.
+show_help() {
+    echo "Usage: aiwas <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  task add <description>  Add a new task. (Triggers AI prioritization)"
+    echo "  task list               List all tasks."
+    echo "  task status <ID> <new_status> Update task status."
+    echo "  ai analyze              Feed system context to AI and get suggestions."
+    echo "  report generate <format> Generate a task report (excel, csv)."
+    echo "  resource monitor        Start resource monitoring daemon."
+    echo "  help                    Show this help message."
+    echo ""
+}
+
+# Function: collect_context
+# Description: Gathers system context (open tasks, directory structure, recent logs) for AI analysis.
+collect_context() {
+    local context=""
+    
+    context+="OPEN TASKS:\n"
+    # Selects top 5 open tasks sorted by priority
+    context+=$(jq -r '. | map(select(.status != "Done")) | sort_by(.priority) | reverse | .[0:5] | 
+        .[] | "[\(.id)] P:\(.priority) \t\t\(.description)"' "${TASK_FILE}")
+    context+="\n\n"
+
+    context+="CURRENT DIRECTORY (max 10 files):\n"
+    context+=$(ls -F --color=never | head -n 10)
+    context+="\n\n"
+
+    context+="RECENT AIWAS ACTIVITY (Last 5 warnings/errors/AI interactions):\n"
+    # Greps for relevant log levels
+    context+=$(grep -E 'AI_|WARNING|ERROR' "${LOG_FILE}" | tail -n 5)
+
+    echo "${context}"
+}
+
+# Function: process_ai_analysis
+# Description: Parses AI's contextual analysis response and displays the suggestion and next command.
+process_ai_analysis() {
+    local ai_json_response="$1"
+    
+    local suggestion
+    local command_suggestion
+    
+    suggestion=$(echo "${ai_json_response}" | jq -r '.suggestion // "No suggestion provided."')
+    command_suggestion=$(echo "${ai_json_response}" | jq -r '.command // "N/A"')
+
+    log_message AI_RESPONSE "Context Analysis Received"
+    
+    echo ""
+    echo "--- AIWAS Contextual Analysis ---"
+    echo -e "Recommendation: \033[0;35m${suggestion}\033[0m"
+    echo "Next Command: ${command_suggestion}"
+    echo "-----------------------------------"
+    echo ""
+}
+
+# Function: generate_report
+# Description: Delegates to the Python script to generate a report in the specified format.
+# Usage: report generate <format>
+generate_report() {
+    local report_format="$1"
+    local output_dir="${OUTPUT_DIR}"
+
+    if [ -z "${report_format}" ]; then
+        log_message ERROR "Report format required. Usage: report generate <excel|csv>"
+        return 1
+    fi
+
+    log_message INFO "Generating ${report_format} report into ${output_dir}..."
+        
+    # Call the Python report generator using the fixed path
+    "${PYTHON_BIN}" "${REPORT_SCRIPT}" "${TASK_FILE}" "${output_dir}" "${report_format}"
+    
+    if [ $? -ne 0 ]; then
+        log_message ERROR "Report generation failed."
+    fi
+}
+
+# Function: handle_command
+# Description: Main command routing logic.
+handle_command() {
+    local primary_command="$1"
+    local secondary_command="$2"
+    shift 2
+
+    case "${primary_command}" in
+        task)
+            log_message INFO "Delegating Task command: ${secondary_command} $@"
+            "${SCRIPT_DIR}/bin/task_manager.sh" "${secondary_command}" "$@"
+            ;;
+        ai)
+            case "${secondary_command}" in
+                analyze)
+                    log_message INFO "Executing AI contextual analysis."
+                    local context_data=$(collect_context)
+                    
+                    log_message AI_QUERY "Sending context data to AI..." silent
+                    
+                    local ai_output
+                    # Call AI Python script for context analysis
+                    ai_output=$("${PYTHON_BIN}" "${AI_SCRIPT}" analyze_context "${context_data}")
+
+                    if [ $? -eq 0 ] && [ -n "${ai_output}" ]; then
+                        process_ai_analysis "${ai_output}"
+                    else
+                        log_message ERROR "AI contextual analysis failed."
+                    fi
+                    ;;
+                *)
+                    log_message ERROR "Invalid AI command: ${secondary_command}"
+                    show_help
+                    ;;
+            esac
+            ;;
+        report)
+            case "${secondary_command}" in
+                generate)
+                    generate_report "$@"
+                    ;;
+                *)
+                    log_message ERROR "Invalid report command: ${secondary_command}. Usage: report generate <format>"
+                    show_help
+                    ;;
+            esac
+            ;;
+        resource)
+            log_message INFO "Delegating Resource command: ${secondary_command} $@"
+            "${SCRIPT_DIR}/bin/resource_monitor.sh" "${secondary_command}" "$@"
+            ;;
+        help)
+            show_help
+            ;;
+        *)
+            log_message ERROR "Unknown command: ${primary_command}"
+            show_help
+            ;;
+    esac
+}
+
+if [ $# -eq 0 ]; then
+    show_help
+    exit 0
+fi
+
+log_message INFO "AIWAS started with command: $@" silent
+
+handle_command "$@"

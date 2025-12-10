@@ -1,0 +1,17 @@
+# RUNTIME GENERATED FILES
+data/tasks.json
+data/system.log
+output/
+
+# PYTHON FILES
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+.env/
+
+# SYSTEM & EDITOR FILES
+.DS_Store
+.vscode/
+.idea/
